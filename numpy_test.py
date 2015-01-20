@@ -20,18 +20,19 @@ import time
 class TestContract(object):
     def setup(self, n=1):
         chars = 'abcdefghij'
-        sizes = np.array([2, 3, 4, 5, 4, 3, 2, 6, 5, 4]) 
+        sizes = np.array([2, 3, 4, 5, 4, 3, 2, 6, 5, 4, 3]) 
         if n!=1:
             sizes *= 1 + np.random.rand(sizes.shape[0]) * n 
             sizes = sizes.astype(np.int)
         self.sizes = {c: s for c, s in zip(chars, sizes)}
 
-    def compare(self, string):
-        views = []
-        terms = string.split('->')[0].split(',')
-        for term in terms:
-            dims = [self.sizes[x] for x in term]
-            views.append(np.random.rand(*dims))
+    def compare(self, string, *views):
+        if len(views)==0:
+            views = []
+            terms = string.split('->')[0].split(',')
+            for term in terms:
+                dims = [self.sizes[x] for x in term]
+                views.append(np.random.rand(*dims))
 
         ein = np.einsum(string, *views)
         opt = contract(string, *views)
@@ -123,6 +124,105 @@ class TestContract(object):
         self.compare('dba,ead,cad->bce')
         self.compare('aef,fbc,dca->bde')
 
+    def test_einsum_errors(self):
+        # Need enough arguments
+        # assert_raises(ValueError, contract)
+        # assert_raises(ValueError, contract, "")
+
+        # subscripts must be a string
+        assert_raises(TypeError, contract, 0, 0)
+
+        # order parameter must be a valid order
+        # assert_raises(TypeError, contract, "", 0, order='W')
+
+        # casting parameter must be a valid casting
+        # assert_raises(ValueError, contract, "", 0, casting='blah')
+
+        # dtype parameter must be a valid dtype
+        # assert_raises(TypeError, contract, "", 0, dtype='bad_data_type')
+
+        # other keyword arguments are rejected
+        # assert_raises(TypeError, contract, "", 0, bad_arg=0)
+
+        # issue 4528 revealed a segfault with this call
+        # assert_raises(TypeError, contract, *(None,)*63)
+
+        # number of operands must match count in subscripts string
+        assert_raises(ValueError, contract, "", 0, 0)
+        assert_raises(ValueError, contract, ",", 0, [0], [0])
+        assert_raises(ValueError, contract, ",", [0])
+
+        # can't have more subscripts than dimensions in the operand
+        assert_raises(ValueError, contract, "i", 0)
+        assert_raises(ValueError, contract, "ij", [0, 0])
+        assert_raises(ValueError, contract, "...i", 0)
+        assert_raises(ValueError, contract, "i...j", [0, 0])
+        assert_raises(ValueError, contract, "i...", 0)
+        assert_raises(ValueError, contract, "ij...", [0, 0])
+
+        # invalid ellipsis
+        assert_raises(ValueError, contract, "i..", [0, 0])
+        assert_raises(ValueError, contract, ".i...", [0, 0])
+        assert_raises(ValueError, contract, "j->..j", [0, 0])
+        assert_raises(ValueError, contract, "j->.j...", [0, 0])
+
+        # invalid subscript character
+        assert_raises(ValueError, contract, "i%...", [0, 0])
+        assert_raises(ValueError, contract, "...j$", [0, 0])
+        assert_raises(ValueError, contract, "i->&", [0, 0])
+
+        # output subscripts must appear in input
+        assert_raises(ValueError, contract, "i->ij", [0, 0])
+
+        # output subscripts may only be specified once
+        assert_raises(ValueError, contract, "ij->jij", [[0, 0], [0, 0]])
+
+        # dimensions much match when being collapsed
+        assert_raises(ValueError, contract, "ii", np.arange(6).reshape(2, 3))
+        assert_raises(ValueError, contract, "ii->i", np.arange(6).reshape(2, 3))
+
+        # broadcasting to new dimensions must be enabled explicitly
+        assert_raises(ValueError, contract, "i", np.arange(6).reshape(2, 3))
+        assert_raises(ValueError, contract, "i->i", [[0, 1], [0, 1]],
+                                            out=np.arange(4).reshape(2, 2))
+
+    def test_einsum_broadcast(self):
+        # Issue #2455 change in handling ellipsis
+        # remove the 'middle broadcast' error
+        # only use the 'RIGHT' iteration in prepare_op_axes
+        # adds auto broadcast on left where it belongs
+        # broadcast on right has to be explicit
+
+        A = np.arange(2*3*4).reshape(2,3,4)
+        B = np.arange(3)
+        ref = np.einsum('ijk,j->ijk',A, B)
+        self.compare('ij...,j...->ij...', A, B)
+        self.compare('ij...,...j->ij...', A, B)
+        self.compare('ij...,j->ij...', A, B) # used to raise error
+
+        A = np.arange(12).reshape((4,3))
+        B = np.arange(6).reshape((3,2))
+        ref = np.einsum('ik,kj->ij',A, B)
+        self.compare('ik...,k...->i...', A, B)
+        self.compare('ik...,...kj->i...j', A, B)
+        self.compare('...k,kj', A, B) # used to raise error
+        self.compare('ik,k...->i...', A, B) # used to raise error
+
+        dims=[2,3,4,5];
+        a = np.arange(np.prod(dims)).reshape(dims)
+        v = np.arange(dims[2])
+        ref = np.einsum('ijkl,k->ijl', a, v)
+        self.compare('ijkl,k', a, v)
+        self.compare('...kl,k', a, v)  # used to raise error
+        self.compare('...kl,k...', a, v)
+        # no real diff from 1st
+
+        J,K,M=160,160,120;
+        A=np.arange(J*K*M).reshape(1,1,1,J,K,M)
+        B=np.arange(J*K*M*3).reshape(J,K,M,3)
+        ref = np.einsum('...lmn,...lmno->...o', A, B)
+        self.compare('...lmn,lmno->...o', A, B)  # used to raise error
+
 t = time.time()
 c = TestContract()
 c.setup()
@@ -135,5 +235,7 @@ c.test_previously_failed()
 c.test_inner_product()
 c.test_dot_product()
 c.test_random_cases()
+#c.test_einsum_errors()
+c.test_einsum_broadcast()
 print(time.time()-t)
 

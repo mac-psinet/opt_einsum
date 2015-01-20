@@ -228,42 +228,108 @@ def contract(subscripts, *operands, **kwargs):
 
     """
 
-    symbols = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    # Parse input
+    if not isinstance(subscripts, basestring):
+        raise TypeError('subscripts must be a string')
 
-    if '.' in subscripts:
-        raise ValueError("Ellipsis are not currently supported by contract.")
+    if ('-' in subscripts) or ('>' in subscripts):
+        invalid = (subscripts.count('-') > 1) or (subscripts.count('>') > 1)
+        if invalid or (subscripts.count('->') != 1):
+            raise ValueError("Subscripts can only contain one '->'.")
+    
+    symbols = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    for s in subscripts:
+        if s in ',.->':
+            continue
+        if s not in symbols:
+            raise ValueError("Character %s is not a valid symbol." % s)
 
     # Split into input and output subscripts
     if '->' in subscripts:
         input_subscripts, output_subscript = subscripts.split('->')
     else:
         input_subscripts = subscripts
-        # Build output subscripts
-        tmp_subscripts = subscripts.replace(',', '')
-        output_subscript = ''
-        for s in sorted(set(tmp_subscripts)):
-            if s not in symbols:
-                raise ValueError("Character %s is not a valid symbol." % s)
-            if tmp_subscripts.count(s) == 1:
-                output_subscript += s
+        output_subscript = None
 
-    # Build a few useful list and sets
+    indices = set(input_subscripts.replace(',', '').replace('.',''))
     input_list = input_subscripts.split(',')
-    input_sets = map(set, input_list)
-    output_set = set(output_subscript)
-    indices = set(input_subscripts.replace(',', ''))
 
     # Make sure number operands is equivalent to the number of terms
     if len(input_list) != len(operands):
         raise ValueError("Number of einsum subscripts must be equal to the \
                           number of operands.")
+    operands = [np.asanyarray(v) for v in operands]
+
+    # Parse ellipsis
+    if '...' in input_subscripts:
+        if output_subscript is None:
+            raise ValueError('Output subscripts require ellipsis if ellipsis in input')
+        symbols_left = symbols - indices
+        has_ellipsis = [num for num, x in enumerate(input_list) if '.' in x] 
+        ellipsis_shape = []
+
+        for tnum in has_ellipsis:
+            tmp_term = input_list[tnum]
+            three = (input_list.count('.') == 3)
+            first = (tmp_term[:3] == '...')
+            last = (tmp_term[-3:] == '...')
+            if three and (first or last):
+                msg = "Subscript with ellipsis '%s' for operand %d is invalid" % (tmp_term, tnum)
+                raise ValueError(msg)
+
+            len_inds = len(tmp_term.replace('...', ''))
+            tmp_shape = operands[tnum].shape
+            len_shape = len(tmp_shape)
+            if first: 
+                 tmp_eshape = tmp_shape[:len_inds]
+            else:
+                 tmp_eshape = tmp_shape[len_shape - len_shape:]
+
+            ellipsis_shape.append(tmp_eshape)
+        
+        # Make sure all ellipses shapes are identical
+        identical = all(x == ellipsis_shape[0] for x in ellipsis_shape)
+        if not identical:
+            raise ValueError('Mismatch in ellipses shape') 
+
+        ellipses_size = len(ellipsis_shape[0])
+
+        new_subscripts = ''.join(symbols_left)[:ellipses_size]
+
+        for tnum in has_ellipsis:
+            input_list[tnum] = input_list[tnum].replace('...', new_subscripts)
+
+        output_subscript = output_subscript.replace('...', new_subscripts)
+        new_indices = ''
+        for x in input_list:
+            new_indices += x
+        indices = set(new_indices)
+    else:
+        if output_subscript is not None:
+            if '.' in output_subscript:
+                raise ValueError('Input subscripts require ellipsis')
+
+    if output_subscript is None:
+        # Build output subscripts
+        tmp_subscripts = input_subscripts.replace(',', '')
+        output_subscript = ''
+        for s in sorted(set(tmp_subscripts)):
+            if tmp_subscripts.count(s) == 1:
+                output_subscript += s
+
+    print subscripts
+    print input_list, output_subscript
+    # Build a few useful list and sets
+    input_sets = map(set, input_list)
+    output_set = set(output_subscript)
+
 
     # Get length of each unique dimension and ensure all dimension are correct
     dimension_dict = {}
     for tnum, term in enumerate(input_list):
         sh = operands[tnum].shape
         if len(sh) != len(term):
-            raise ValueError("einstein sum subscript %s does not contain the \
+            raise ValueError("Subscript %s does not contain the \
               correct number of indices for operand %d.", operands[tnum], tnum)
         for cnum, char in enumerate(term):
             dim = sh[cnum]
@@ -276,7 +342,6 @@ def contract(subscripts, *operands, **kwargs):
 
     # TODO Should probably be cast up to double precision
     arr_dtype = np.result_type(*operands)
-    operands = [np.asanyarray(v) for v in operands]
     einsum_args = {'dtype':arr_dtype, 'order':'C'}
 
     # Compute size of each input array plus the output array
@@ -291,14 +356,15 @@ def contract(subscripts, *operands, **kwargs):
     memory_arg = kwargs.get("memory", out_size)
     return_path_arg = kwargs.get("return_path", False)
 
+    # A few optimization that help specific cases
     # If total flops is very small just avoid the overhead altogether
     total_flops = _compute_size_by_dict(indices, dimension_dict)
     # if (total_flops < 1e6) and not return_path_arg:
     #     return np.einsum(subscripts, *operands, **einsum_args)
 
     # If no rank reduction leave it to einsum
-    if (indices == output_set) and not return_path_arg:
-        return np.einsum(subscripts, *operands, **einsum_args)
+    # if (indices == output_set) and not return_path_arg:
+    #     return np.einsum(subscripts, *operands, **einsum_args)
 
     # Compute path
     if not isinstance(path_arg, str):
@@ -329,7 +395,7 @@ def contract(subscripts, *operands, **kwargs):
         for x in contract_inds:
             tmp_inputs.append(input_list.pop(x))
 
-        # Last contraction
+        # Last contraction, make sure indices match the final result
         if (cnum - len(path)) == -1:
             idx_result = output_subscript
         else:    
