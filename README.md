@@ -1,6 +1,8 @@
 opt_einsum
 ==========
 
+!Warning: This is a deprectated branch, please switch to the master branch.
+
 |  **`Travis CI Status`**   |
 |-------------------|
 | [![Build Status](https://travis-ci.org/dgasmith/opt_einsum.svg?branch=numpy_pr)](https://travis-ci.org/dgasmith/opt_einsum) |
